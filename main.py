@@ -1,11 +1,33 @@
+import sqlite3
 import openrouteservice
 import folium
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from typing import List, Tuple
 
-ORS_API_KEY = "ClaveApi"
+
+ORS_API_KEY = "claveAPI"
 client = openrouteservice.Client(key=ORS_API_KEY)
+
+
+def read_database():
+    conn = sqlite3.connect("vrp_data.db")
+    cursor = conn.cursor()
+
+    
+    cursor.execute("SELECT latitude, longitude, demand FROM locations")
+    locations = [(row[0], row[1]) for row in cursor.fetchall()]
+    cursor.execute("SELECT demand FROM locations")
+    demands = [row[0] for row in cursor.fetchall()]
+
+    
+    cursor.execute("SELECT capacity FROM trucks")
+    truck_capacities = [row[0] for row in cursor.fetchall()]
+
+    conn.close()
+    print(len(truck_capacities))
+    return locations, demands, truck_capacities
+
 
 def get_distance_time_matrix(locations: List[Tuple[float, float]]) -> Tuple[List[List[float]], List[List[float]]]:
     coords = [[lng, lat] for lat, lng in locations]
@@ -15,6 +37,7 @@ def get_distance_time_matrix(locations: List[Tuple[float, float]]) -> Tuple[List
         units="km"
     )
     return response["distances"], response["durations"]
+
 
 def solve_vrp_with_capacity(
     time_matrix: List[List[float]], 
@@ -31,6 +54,7 @@ def solve_vrp_with_capacity(
 
     transit_callback_index = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
 
     def demand_callback(from_index):
         from_node = manager.IndexToNode(from_index)
@@ -61,93 +85,175 @@ def solve_vrp_with_capacity(
             index = solution.Value(routing.NextVar(index))
         route.append(manager.IndexToNode(index))
         routes.append(route)
+
+    
+    for i, route in enumerate(routes):
+        print(f"Camión {i + 1} ruta: {route}")
     return routes
+
 
 def get_route_coordinates(locations: List[Tuple[float, float]], routes: List[List[int]]) -> List[List[Tuple[float, float]]]:
     all_routes_coords = []
     for route in routes:
         route_coords = []
         for i in range(len(route) - 1):
-            start = locations[route[i]]
-            end = locations[route[i + 1]]
-            directions = client.directions(
-                coordinates=[[start[1], start[0]], [end[1], end[0]]],
-                profile="driving-car",
-                format="geojson",
-            )
-            segment_coords = [(coord[1], coord[0]) for coord in directions["features"][0]["geometry"]["coordinates"]]
-            route_coords.extend(segment_coords)
+            start_coords = [locations[route[i]][1], locations[route[i]][0]]
+            end_coords = [locations[route[i + 1]][1], locations[route[i + 1]][0]]
+
+            
+            try:
+                directions = client.directions(
+                    coordinates=[start_coords, end_coords],
+                    profile="driving-car",
+                    format="geojson"
+                )
+                geometry = directions["features"][0]["geometry"]["coordinates"]
+            
+                route_coords.extend([(coord[1], coord[0]) for coord in geometry])
+            except Exception as e:
+                print(f"Error al obtener ruta entre {start_coords} y {end_coords}: {e}")
+
         all_routes_coords.append(route_coords)
     return all_routes_coords
 
-def visualize_routes_with_layer_control(
-    locations: List[Tuple[float, float]],
-    routes: List[List[int]],
-    all_route_coords: List[List[Tuple[float, float]]],
-    time_matrix: List[List[float]],
-    distance_matrix: List[List[float]],
-    demands: List[int]
-) -> folium.Map:
+def visualize_routes_and_generate_main_map_with_filters(
+    locations: List[Tuple[float, float]], 
+    routes: List[List[int]], 
+    all_routes_coords: List[List[Tuple[float, float]]], 
+    time_matrix: List[List[float]], 
+    demands: List[int],
+    individual_maps: List[Tuple[int, str]]
+):
     map_route = folium.Map(location=locations[0], zoom_start=11)
     colors = ["blue", "green", "red", "purple", "orange"]
 
-    for vehicle_id, (route, route_coords) in enumerate(zip(routes, all_route_coords)):
-        layer = folium.FeatureGroup(name=f"Ruta del Camión {vehicle_id + 1}")
+    for vehicle_id, (route, route_coords) in enumerate(zip(routes, all_routes_coords)):
+        if len(route) <= 2:
+            print(f"Camión {vehicle_id + 1} no tiene rutas asignadas.")
+            continue
 
         color = colors[vehicle_id % len(colors)]
-        folium.PolyLine(route_coords, color=color, weight=5, opacity=0.8).add_to(layer)
+        route_layer = folium.FeatureGroup(name=f"Camión {vehicle_id + 1}", show=True)
 
-        total_distance = 0
-        total_time = 0
+        folium.PolyLine(
+            route_coords, 
+            color=color, 
+            weight=5, 
+            opacity=0.8, 
+            tooltip=f"Ruta del Camión {vehicle_id + 1}"
+        ).add_to(route_layer)
 
         for i, node in enumerate(route[:-1]):
-            next_node = route[i + 1]
-            distance = distance_matrix[node][next_node]
-            time = time_matrix[node][next_node] / 60  
-            total_distance += distance
-            total_time += time
-
             folium.Marker(
                 locations[node],
-                popup=(f"<b>Parada {i + 1}</b><br>"
-                       f"Demanda entregada: {demands[node]} unidades<br>"
-                       f"Tiempo al siguiente: {time:.1f} min<br>"
-                       f"Distancia al siguiente: {distance:.1f} km<br>"
-                       f"Distancia total: {total_distance:.1f} km<br>"
-                       f"Tiempo total: {total_time:.1f} min"),
+                popup=(f"<b>Parada {i + 1}</b><br>Demanda: {demands[node]} unidades"),
                 icon=folium.Icon(color=color, icon="info-sign"),
-            ).add_to(layer)
+            ).add_to(route_layer)
 
-        layer.add_to(map_route)
+        route_layer.add_to(map_route)
 
-    folium.LayerControl().add_to(map_route)
+    folium.LayerControl(collapsed=False).add_to(map_route)
+
+    buttons_html = "".join([
+        f"<a href='{file}' target='_blank'>Ver ruta del Camión {vehicle_id}</a><br>"
+        for vehicle_id, file in individual_maps
+    ])
+    folium.Marker(
+        locations[0],
+        popup=folium.Popup(f"<b>Selecciona una ruta:</b><br>{buttons_html}", max_width=300),
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(map_route)
 
     return map_route
 
-if __name__ == "__main__":
-    central_location = (28.120056, -15.430251)
-    locations = [
-        central_location,
-        (28.073687556995907, -15.451800956382401),
-        (27.90184647216374, -15.446392923173903),
-        (27.765357123904156, -15.673442527691762),
-        (27.808588135553386, -15.483237769536828),
-        (27.798971369372776, -15.715452437780161),
-        (28.11807130798369, -15.524992806538343),
-        (28.132453377326556, -15.66115490051511),
-    ]
 
-    demands = [0, 10, 15, 20, 5, 25, 10, 15]  
-    vehicle_capacities = [50, 40, 40]  
+def generate_individual_maps(
+    locations: List[Tuple[float, float]], 
+    routes: List[List[int]], 
+    all_routes_coords: List[List[Tuple[float, float]]], 
+    time_matrix: List[List[float]], 
+    demands: List[int],
+    drivers: List[str] 
+):
+    colors = ["blue", "green", "red", "purple", "orange"]
+    individual_maps = []
+
+    for vehicle_id, (route, route_coords) in enumerate(zip(routes, all_routes_coords)):
+        if len(route) <= 2:
+            print(f"Camión {vehicle_id + 1} no tiene rutas asignadas.")
+            continue
+
+        color = colors[vehicle_id % len(colors)]
+        individual_map = folium.Map(location=locations[0], zoom_start=11)
+
+        folium.PolyLine(
+            route_coords, 
+            color=color, 
+            weight=5, 
+            opacity=0.8, 
+            tooltip=f"Ruta del Camión {vehicle_id + 1}"
+        ).add_to(individual_map)
+
+        total_distance = 0.0
+        total_time = 0.0
+
+        for i, node in enumerate(route[:-1]):
+            next_node = route[i + 1]
+            distance = time_matrix[node][next_node] / 1000.0 
+            time = time_matrix[node][next_node] / 60.0 
+            total_distance += distance
+            total_time += time
+
+            if demands[node] > 0:
+                icon = "info-sign" 
+            else:
+                icon = "ok-sign"  
+
+            popup_html = f"""
+            <b>Parada {i + 1}</b><br>
+            <b>Conductor:</b> {drivers[vehicle_id]}<br>
+            <b>Distancia desde la última parada:</b> {distance:.2f} km<br>
+            <b>Tiempo desde la última parada:</b> {time:.2f} minutos<br>
+            <b>Demanda:</b> {demands[node]} unidades<br>
+            <b>Distancia total:</b> {total_distance:.2f} km<br>
+            <b>Tiempo total:</b> {total_time:.2f} minutos<br>
+            """
+
+            folium.Marker(
+                locations[node],
+                popup=folium.Popup(popup_html, max_width=300),
+                icon=folium.Icon(color=color, icon=icon),
+            ).add_to(individual_map)
+
+        individual_map_file = f"ruta_camion_{vehicle_id + 1}.html"
+        individual_map.save(individual_map_file)
+        individual_maps.append((vehicle_id + 1, individual_map_file))
+
+    return individual_maps
+
+
+if __name__ == "__main__":
+    locations, demands, truck_capacities = read_database()
 
     print("Obteniendo matriz de distancia y tiempo...")
     distance_matrix, time_matrix = get_distance_time_matrix(locations)
 
-    print("Resolviendo VRP con 3 camiones...")
-    routes = solve_vrp_with_capacity(time_matrix, demands, vehicle_capacities)
+    print("Resolviendo VRP...")
+    routes = solve_vrp_with_capacity(time_matrix, demands, truck_capacities)
+
+    print("Obteniendo coordenadas para rutas por carretera...")
     route_coords = get_route_coordinates(locations, routes)
 
-    print("Visualizando las rutas con selección por camión...")
-    map_route = visualize_routes_with_layer_control(locations, routes, route_coords, time_matrix, distance_matrix, demands)
-    map_route.save("rutas_3_camiones_seleccion.html")
-    print("Mapa guardado en 'rutas_3_camiones_seleccion.html'. Ábrelo en un navegador.")
+    drivers = ["Conductor A", "Conductor B", "Conductor C"]
+
+    print("Generando mapas individuales...")
+    individual_maps = generate_individual_maps(
+        locations, routes, route_coords, time_matrix, demands, drivers
+    )
+
+    print("Visualizando mapa principal con filtros...")
+    map_route = visualize_routes_and_generate_main_map_with_filters(
+        locations, routes, route_coords, time_matrix, demands, individual_maps
+    )
+    map_route.save("rutas_principal.html")
+    print("Mapa guardado en 'rutas_principal.html'. Ábrelo en un navegador.")
