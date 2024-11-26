@@ -1,6 +1,7 @@
 #TODO:implementar API de tráfico
-#TODO:acutaulización cada 10 minutos
-#TODO:corregir información despglegada
+#TODO:actualización cada 10 minutos
+#TODO:corregir información desplegada
+#TODO:sistema de prioridades
 import sqlite3
 import openrouteservice
 import folium
