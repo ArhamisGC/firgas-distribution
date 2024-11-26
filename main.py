@@ -1,6 +1,10 @@
+#TODO:implementar API de tráfico
+#TODO:acutaulización cada 10 minutos
+#TODO:corregir información
 import sqlite3
 import openrouteservice
 import folium
+import geocoder
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from typing import List, Tuple
@@ -8,6 +12,52 @@ from typing import List, Tuple
 
 ORS_API_KEY = "claveAPI"
 client = openrouteservice.Client(key=ORS_API_KEY)
+
+import requests
+from typing import Tuple
+
+def get_precise_location(api_key: str) -> Tuple[float, float]:
+    """
+    Obtiene la ubicación precisa utilizando la API de BigDataCloud.
+    :param api_key: Tu clave de API de BigDataCloud.
+    :return: Una tupla (latitud, longitud).
+    """
+    url = f"https://api.bigdatacloud.net/data/ip-geolocation?key={api_key}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        latitude = data.get("location", {}).get("latitude")
+        longitude = data.get("location", {}).get("longitude")
+        if latitude is not None and longitude is not None:
+            print(f"Ubicación obtenida: Latitud {latitude}, Longitud {longitude}")
+            return latitude, longitude
+        else:
+            raise ValueError("No se pudo extraer latitud y longitud del resultado.")
+    else:
+        raise ValueError(f"Error en BigDataCloud API: {response.status_code} - {response.text}")
+
+
+def read_database():
+    conn = sqlite3.connect("vrp_data.db")
+    cursor = conn.cursor()
+
+    # Verifica si existen las tablas requeridas
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [table[0] for table in cursor.fetchall()]
+    if "locations" not in tables or "trucks" not in tables:
+        raise sqlite3.OperationalError("La base de datos no contiene las tablas requeridas.")
+
+    cursor.execute("SELECT latitude, longitude, demand FROM locations")
+    locations = [(row[0], row[1]) for row in cursor.fetchall()]
+    cursor.execute("SELECT demand FROM locations")
+    demands = [row[0] for row in cursor.fetchall()]
+
+    cursor.execute("SELECT capacity FROM trucks")
+    truck_capacities = [row[0] for row in cursor.fetchall()]
+
+    conn.close()
+    return locations, demands, truck_capacities
+
 
 
 def read_database():
@@ -116,56 +166,6 @@ def get_route_coordinates(locations: List[Tuple[float, float]], routes: List[Lis
         all_routes_coords.append(route_coords)
     return all_routes_coords
 
-def visualize_routes_and_generate_main_map_with_filters(
-    locations: List[Tuple[float, float]], 
-    routes: List[List[int]], 
-    all_routes_coords: List[List[Tuple[float, float]]], 
-    time_matrix: List[List[float]], 
-    demands: List[int],
-    individual_maps: List[Tuple[int, str]]
-):
-    map_route = folium.Map(location=locations[0], zoom_start=11)
-    colors = ["blue", "green", "red", "purple", "orange"]
-
-    for vehicle_id, (route, route_coords) in enumerate(zip(routes, all_routes_coords)):
-        if len(route) <= 2:
-            print(f"Camión {vehicle_id + 1} no tiene rutas asignadas.")
-            continue
-
-        color = colors[vehicle_id % len(colors)]
-        route_layer = folium.FeatureGroup(name=f"Camión {vehicle_id + 1}", show=True)
-
-        folium.PolyLine(
-            route_coords, 
-            color=color, 
-            weight=5, 
-            opacity=0.8, 
-            tooltip=f"Ruta del Camión {vehicle_id + 1}"
-        ).add_to(route_layer)
-
-        for i, node in enumerate(route[:-1]):
-            folium.Marker(
-                locations[node],
-                popup=(f"<b>Parada {i + 1}</b><br>Demanda: {demands[node]} unidades"),
-                icon=folium.Icon(color=color, icon="info-sign"),
-            ).add_to(route_layer)
-
-        route_layer.add_to(map_route)
-
-    folium.LayerControl(collapsed=False).add_to(map_route)
-
-    buttons_html = "".join([
-        f"<a href='{file}' target='_blank'>Ver ruta del Camión {vehicle_id}</a><br>"
-        for vehicle_id, file in individual_maps
-    ])
-    folium.Marker(
-        locations[0],
-        popup=folium.Popup(f"<b>Selecciona una ruta:</b><br>{buttons_html}", max_width=300),
-        icon=folium.Icon(color="blue", icon="info-sign"),
-    ).add_to(map_route)
-
-    return map_route
-
 
 def generate_individual_maps(
     locations: List[Tuple[float, float]], 
@@ -231,9 +231,77 @@ def generate_individual_maps(
 
     return individual_maps
 
+def visualize_routes_and_generate_main_map_with_filters(
+    locations: List[Tuple[float, float]],
+    gps_location: Tuple[float, float],
+    routes: List[List[int]],
+    all_routes_coords: List[List[Tuple[float, float]]],
+    time_matrix: List[List[float]],
+    demands: List[int],
+    individual_maps: List[Tuple[int, str]]
+):
+    map_route = folium.Map(location=locations[0], zoom_start=11)
+    colors = ["blue", "green", "red", "purple", "orange"]
+
+    for vehicle_id, (route, route_coords) in enumerate(zip(routes, all_routes_coords)):
+        if len(route) <= 2:
+            continue
+
+        color = colors[vehicle_id % len(colors)]
+        route_layer = folium.FeatureGroup(name=f"Camión {vehicle_id + 1}", show=True)
+
+        folium.PolyLine(
+            route_coords,
+            color=color,
+            weight=5,
+            opacity=0.8,
+            tooltip=f"Ruta del Camión {vehicle_id + 1}"
+        ).add_to(route_layer)
+
+        for i, node in enumerate(route[:-1]):
+            folium.Marker(
+                locations[node],
+                popup=(f"<b>Parada {i + 1}</b><br>Demanda: {demands[node]} unidades"),
+                icon=folium.Icon(color=color, icon="info-sign"),
+            ).add_to(route_layer)
+
+        route_layer.add_to(map_route)
+
+    # Agregar marcador para la localización GPS
+    folium.Marker(
+        gps_location,
+        popup=folium.Popup("<b>Tu localización actual</b>", max_width=300),
+        icon=folium.Icon(color="red", icon="user"),
+    ).add_to(map_route)
+
+    folium.LayerControl(collapsed=False).add_to(map_route)
+
+    buttons_html = "".join([
+        f"<a href='{file}' target='_blank'>Ver ruta del Camión {vehicle_id}</a><br>"
+        for vehicle_id, file in individual_maps
+    ])
+    folium.Marker(
+        locations[0],
+        popup=folium.Popup(f"<b>Selecciona una ruta:</b><br>{buttons_html}", max_width=300),
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(map_route)
+
+    return map_route
+
 
 if __name__ == "__main__":
-    locations, demands, truck_capacities = read_database()
+    try:
+        gps_location = get_precise_location("claveAPI")
+        print(f"Localización GPS detectada: {gps_location}")
+    except ValueError as e:
+        print(str(e))
+        gps_location = None
+
+    try:
+        locations, demands, truck_capacities = read_database()
+    except sqlite3.OperationalError as e:
+        print(f"Error en la base de datos: {str(e)}")
+        exit(1)
 
     print("Obteniendo matriz de distancia y tiempo...")
     distance_matrix, time_matrix = get_distance_time_matrix(locations)
@@ -253,7 +321,7 @@ if __name__ == "__main__":
 
     print("Visualizando mapa principal con filtros...")
     map_route = visualize_routes_and_generate_main_map_with_filters(
-        locations, routes, route_coords, time_matrix, demands, individual_maps
+        locations, gps_location, routes, route_coords, time_matrix, demands, individual_maps
     )
     map_route.save("rutas_principal.html")
     print("Mapa guardado en 'rutas_principal.html'. Ábrelo en un navegador.")
