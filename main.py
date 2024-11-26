@@ -1,6 +1,6 @@
 #TODO:implementar API de tráfico
 #TODO:acutaulización cada 10 minutos
-#TODO:corregir información
+#TODO:corregir información despglegada
 import sqlite3
 import openrouteservice
 import folium
@@ -17,11 +17,6 @@ import requests
 from typing import Tuple
 
 def get_precise_location(api_key: str) -> Tuple[float, float]:
-    """
-    Obtiene la ubicación precisa utilizando la API de BigDataCloud.
-    :param api_key: Tu clave de API de BigDataCloud.
-    :return: Una tupla (latitud, longitud).
-    """
     url = f"https://api.bigdatacloud.net/data/ip-geolocation?key={api_key}"
     response = requests.get(url)
     if response.status_code == 200:
@@ -267,7 +262,6 @@ def visualize_routes_and_generate_main_map_with_filters(
 
         route_layer.add_to(map_route)
 
-    # Agregar marcador para la localización GPS
     folium.Marker(
         gps_location,
         popup=folium.Popup("<b>Tu localización actual</b>", max_width=300),
